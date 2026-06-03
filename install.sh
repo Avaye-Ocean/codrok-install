@@ -162,6 +162,116 @@ echo "  Setup guide: https://github.com/Avaye-Ocean/codrok/blob/main/SETUP.md"
 echo "  To get a license key, email: kezyolanipekun@gmail.com"
 echo ""
 
+# ── Step 0b: Pre-flight Checklist ───────────────────────────────────────────
+# codrok expects the engineer to already have:
+#   1. Git installed and configured
+#   2. GitHub CLI (gh) installed and authenticated
+#   3. Membership in the GitHub org the license is bound to
+#   4. Claude Code CLI installed (checked later, installed if missing)
+#
+# We surface this before touching anything so the user knows what's expected.
+
+echo ""
+echo "  ${BOLD}─── Pre-flight Checklist ───${NC}"
+echo ""
+echo "  Before codrok can be installed, your machine needs:"
+echo ""
+echo "    ${BOLD}1. Git${NC}          — installed and configured (git config user.name)"
+echo "    ${BOLD}2. GitHub CLI${NC}   — installed and authenticated (gh auth status)"
+echo "    ${BOLD}3. Org access${NC}   — you are a member of the GitHub org on your license"
+echo "    ${BOLD}4. Claude CLI${NC}   — installed (checked later, we can install if missing)"
+echo ""
+echo "  ${YELLOW}If any of these are missing, the installer will stop and tell you what to fix.${NC}"
+echo ""
+echo -n "  Ready to proceed with the pre-flight check? [Y/n]: "
+read -r PREFLIGHT_CONFIRM
+PREFLIGHT_CONFIRM="${PREFLIGHT_CONFIRM:-y}"
+
+if [ "$PREFLIGHT_CONFIRM" != "y" ] && [ "$PREFLIGHT_CONFIRM" != "Y" ]; then
+  echo ""
+  echo "  ${YELLOW}Pre-flight skipped.${NC}"
+  echo ""
+  echo "  Before running this installer, make sure you have:"
+  echo "    • Git:        https://git-scm.com/downloads"
+  echo "    • GitHub CLI: https://cli.github.com"
+  echo "    • Org access: ask your GitHub org admin to invite you"
+  echo "    • Claude CLI: https://claude.ai/code"
+  echo ""
+  echo "  Then re-run:"
+  echo "    bash <(curl -fsSL https://raw.githubusercontent.com/Avaye-Ocean/codrok-install/main/install.sh)"
+  exit 0
+fi
+
+echo ""
+echo "  ${BOLD}Running pre-flight checks…${NC}"
+echo ""
+
+PREFLIGHT_FAILED=false
+
+# Check 1: Git
+echo -n "  [1/4] Git… "
+if command -v git &>/dev/null; then
+  GIT_USER=$(git config user.name 2>/dev/null || echo "")
+  GIT_EMAIL=$(git config user.email 2>/dev/null || echo "")
+  if [ -n "$GIT_USER" ] && [ -n "$GIT_EMAIL" ]; then
+    echo -e "${GREEN}✓${NC}  $GIT_USER <$GIT_EMAIL>"
+  else
+    echo -e "${YELLOW}⚠${NC}  installed but user.name/user.email not configured"
+    echo "       Run: git config --global user.name \"Your Name\""
+    echo "            git config --global user.email \"you@example.com\""
+    PREFLIGHT_FAILED=true
+  fi
+else
+  echo -e "${RED}✗${NC}  not found"
+  echo "       Install: https://git-scm.com/downloads"
+  PREFLIGHT_FAILED=true
+fi
+
+# Check 2: GitHub CLI
+echo -n "  [2/4] GitHub CLI (gh)… "
+if command -v gh &>/dev/null; then
+  if gh auth status &>/dev/null 2>&1; then
+    GH_USER=$(gh api user --jq '.login' 2>/dev/null || echo "unknown")
+    echo -e "${GREEN}✓${NC}  authenticated as ${GH_USER}"
+  else
+    echo -e "${RED}✗${NC}  installed but not authenticated"
+    echo "       Run: gh auth login"
+    PREFLIGHT_FAILED=true
+  fi
+else
+  echo -e "${RED}✗${NC}  not found"
+  echo "       Install: https://cli.github.com"
+  PREFLIGHT_FAILED=true
+fi
+
+# Check 3: Claude Code CLI
+echo -n "  [3/4] Claude Code CLI… "
+if command -v claude &>/dev/null; then
+  CLAUDE_VERSION=$(claude --version 2>/dev/null || echo "unknown")
+  echo -e "${GREEN}✓${NC}  $CLAUDE_VERSION"
+else
+  echo -e "${YELLOW}⚠${NC}  not found — will be installed in the next step"
+fi
+
+# Check 4: Org access (deferred — we need the license key to know the org)
+# We'll check after key validation in Step 3.
+echo -n "  [4/4] GitHub org access… "
+echo -e "${YELLOW}⟳${NC}  checked after license key validation"
+
+echo ""
+
+if [ "$PREFLIGHT_FAILED" = true ]; then
+  echo -e "${RED}${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+  echo -e "${RED}${BOLD}  Pre-flight failed.${NC}"
+  echo -e "${RED}${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+  echo ""
+  echo "  Fix the issues above, then re-run:"
+  echo "    bash <(curl -fsSL https://raw.githubusercontent.com/Avaye-Ocean/codrok-install/main/install.sh)"
+  exit 1
+fi
+
+echo -e "  ${GREEN}${BOLD}Pre-flight passed.${NC}"
+
 # ── Step 1: API Key ─────────────────────────────────────────────────────────
 if [ -n "${CODROK_API_KEY:-}" ]; then
   echo "  Using CODROK_API_KEY from environment."
@@ -285,6 +395,46 @@ fi
 
 ORG="$KEY_ORG"
 ORG_REPO="${ORG}-codrok"
+
+# ── Step 7b: Verify org membership ──────────────────────────────────────────
+# Now that we know the org from the license, verify the user actually belongs to it.
+echo ""
+echo "  Verifying org membership for ${BOLD}${ORG}${NC}…"
+
+if command -v gh &>/dev/null && gh auth status &>/dev/null 2>&1; then
+  GH_USER=$(gh api user --jq '.login' 2>/dev/null || echo "")
+  ORG_CHECK=$(gh api "orgs/${ORG}/memberships/${GH_USER}" --jq '.state' 2>/dev/null || echo "")
+
+  if [ "$ORG_CHECK" = "active" ]; then
+    echo -e "  ${GREEN}✓${NC}  ${GH_USER} is a member of ${ORG}"
+  else
+    # Try listing user's orgs as a fallback
+    USER_ORGS=$(gh api user/orgs --jq '.[].login' 2>/dev/null || echo "")
+    if echo "$USER_ORGS" | grep -q "^${ORG}$"; then
+      echo -e "  ${GREEN}✓${NC}  ${GH_USER} has access to ${ORG}"
+    else
+      echo -e "  ${YELLOW}⚠${NC}  Could not confirm ${GH_USER} is a member of ${BOLD}${ORG}${NC}"
+      echo ""
+      echo "  This license is bound to the ${BOLD}${ORG}${NC} GitHub organization."
+      echo "  Make sure your GitHub account (${GH_USER}) is a member of this org."
+      echo "  Ask your org admin to add you at:"
+      echo "    https://github.com/orgs/${ORG}/people"
+      echo ""
+      echo -n "  Continue anyway? [y/N]: "
+      read -r ORG_CONTINUE
+      if [ "$ORG_CONTINUE" != "y" ] && [ "$ORG_CONTINUE" != "Y" ]; then
+        echo ""
+        echo "  Join the org and re-run:"
+        echo "    bash <(curl -fsSL https://raw.githubusercontent.com/Avaye-Ocean/codrok-install/main/install.sh)"
+        exit 1
+      fi
+      echo ""
+    fi
+  fi
+else
+  echo -e "  ${YELLOW}⚠${NC}  gh CLI not available — skipping org membership check"
+  echo "  Make sure your GitHub account is a member of ${BOLD}${ORG}${NC}"
+fi
 
 # ── Step 8: Generate install ID ─────────────────────────────────────────────
 INSTALL_ID="inst_${ORG}_$(openssl rand -hex 4 2>/dev/null || echo $(date +%s | shasum | cut -c1-8))"
